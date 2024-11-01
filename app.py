@@ -8,7 +8,9 @@ from threading import Thread
 from datetime import datetime, timedelta
 import threading
 import telebot
+from flask import Flask, render_template, request
 
+app = Flask(__name__)
 bot_token = '6709908471:AAFjVxmWZDZoebcxRksziBScALHM2-2a4I8'
 bot = telebot.TeleBot(bot_token)
 user_data = {}
@@ -16,6 +18,18 @@ allowed_users = ['6214674757']
 admin_id = '6214674757'
 subscription_data = {}
 
+@app.route('/bot_webhook', methods=['POST'])
+def bot_webhook():
+  bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode('utf-8'))])
+  return 'OK'
+
+
+@app.route('/set_app', methods=['GET'])
+def set_app():
+  bot.remove_webhook()
+  bot.set_webhook("https://" + request.host + "/bot_webhook")
+  return 'Done'
+  
 keyboard = telebot.types.InlineKeyboardMarkup(row_width=2)
 btn_add_recipient = telebot.types.InlineKeyboardButton('', callback_data='add_recipient')
 btn_add_sender = telebot.types.InlineKeyboardButton('تعيين ايميل شد', callback_data='add_sender')
@@ -434,4 +448,116 @@ def show_accounts(message, user_id):
         
 
         full_message = '\n'.join(accounts)
- 
+       
+        if len(full_message) > MAX_MESSAGE_LENGTH:
+            chunks = [full_message[i:i+MAX_MESSAGE_LENGTH] for i in range(0, len(full_message), MAX_MESSAGE_LENGTH)]
+            for chunk in chunks:
+                bot.send_message(chat_id=message.chat.id, text=chunk)
+        else:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=message.message_id, text=full_message)
+
+
+
+def show_all_info(message, user_id):
+    user_info = user_data[user_id]
+    info_message = f"إيميلات الدعم:\n"
+    for i, recipient in enumerate(user_info['recipients']):
+        info_message += f"ايميل دعم لكليشة {i + 1}: {recipient}\n"
+    info_message += f"\nالموضوعات والكليشة:\n\n"
+    for i, (subject, msg) in enumerate(zip(user_info['email_subjects'], user_info['email_messages'])):
+        info_message += f"الموضوع {i + 1}: {subject}\nالكليشة {i + 1}: {msg}\n\n"
+    info_message += f"السليب: {user_info['interval_seconds']} ثانية\n\n"
+    info_message += f"عدد الرسائل: {user_info['message_count']}\n"
+    
+    if len(info_message) > 4096:
+        parts = [info_message[i:i+4096] for i in range(0, len(info_message), 4096)]
+        for part in parts:
+            bot.send_message(message.chat.id, part)
+    else:
+        bot.send_message(message.chat.id, info_message)
+
+
+def clear_all_info(message, user_id):
+    user_data[user_id] = {
+        'email_senders': [],
+        'email_passwords': [],
+        'recipients': [],
+        'email_subjects': [],
+        'email_messages': [],
+        'interval_seconds': 0,
+        'message_count': 0,
+        'current_subject': '',
+        'current_message': ''
+    }
+    
+def delete_klishes(message, user_id):
+    user_data[user_id]['email_subjects'].clear()
+    user_data[user_id]['email_messages'].clear()
+    user_data[user_id]['recipients'].clear()
+    bot.edit_message_text(chat_id=message.chat.id, message_id=message.message_id, text='تم حذف جميع الكليشات والمواضيع وإيميلات المستلمين بنجاح!')
+
+def add_subscriber(message):
+    new_user_id = message.text
+    bot.reply_to(message, 'اختار مدة الاشتراك', reply_markup=duration_keyboard)
+    subscription_data['temp_user_id'] = new_user_id
+
+
+def handle_subscription_duration(call, admin_id, duration):
+    temp_user_id = subscription_data.get('temp_user_id')
+    if not temp_user_id:
+        bot.send_message(admin_id, 'لم يتم العثور على المستخدم. الرجاء المحاولة مرة أخرى.')
+        return
+
+    duration_map = {
+        'duration_1_day': timedelta(days=1),
+        'duration_1_week': timedelta(weeks=1),
+        'duration_1_month': timedelta(days=30),
+        'duration_1_year': timedelta(days=365)
+    }
+    duration_timedelta = duration_map.get(duration)
+    if not duration_timedelta:
+        bot.send_message(admin_id, 'مدة اشتراك غير صالحة. الرجاء المحاولة مرة أخرى.')
+        return
+
+    expiration_date = datetime.now() + duration_timedelta
+    allowed_users.append(temp_user_id)
+    subscription_data[temp_user_id] = expiration_date
+    bot.send_message(admin_id, f'تم إضافة المستخدم {temp_user_id} بنجاح لمدة {duration_timedelta.days} يوم.')
+
+
+    Thread(target=remove_user_after_duration, args=(temp_user_id, duration_timedelta)).start()
+
+
+def remove_user_after_duration(user_id, duration):
+    time.sleep(duration.total_seconds())
+    if user_id in allowed_users:
+        allowed_users.remove(user_id)
+        del subscription_data[user_id]
+        bot.send_message(admin_id, f'تمت إزالة المستخدم {user_id} بعد انتهاء مدة الاشتراك.')
+
+
+def show_subscribers(message):
+    if not subscription_data:
+        bot.reply_to(message, 'لا يوجد مشتركون حاليًا.')
+        return
+
+    subscribers_info = []
+    for user_id, expiration_date in subscription_data.items():
+        subscribers_info.append(f'ID: {user_id}, مدة الاشتراك: {expiration_date}')
+
+    bot.reply_to(message, '\n'.join(subscribers_info))
+
+
+def remove_subscriber(message):
+    user_id = message.text
+    if user_id in allowed_users:
+        allowed_users.remove(user_id)
+        del subscription_data[user_id]
+        bot.reply_to(message, f'تم حذف المستخدم {user_id} بنجاح.')
+    else:
+        bot.reply_to(message, 'المستخدم غير موجود في قائمة المشتركين.')
+
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
